@@ -5,22 +5,8 @@ date: "6/11/2020"
 output: html_document
 ---
 
-[Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program](https://economics.mit.edu/files/11859)
+# {.tabset .tabset-fade .tabset-pills}
 
-Abadie, A., Diamond, A., Hainmueller, J. (2014). Comparative Politics and the Synthetic Control
-Method. American Journal of Political Science Forthcoming 2014.
-
-Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of
-Statistical Software 42 (13) 1–17.
-
-Abadie A, Diamond A, Hainmueller J (2010). Synthetic Control Methods for Comparative Case
-Studies: Estimating the Effect of California’s Tobacco Control Program. Journal of the American
-Statistical Association 105 (490) 493–505.
-
-[Abadie, A. and Gardeazabal, J. (2003) Economic Costs of Conflict: A Case Study of the Basque
-Country American Economic Review 93 (1) 113–132](https://economics.mit.edu/files/11870).
-
-[Impact of Drought on Crime in California](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0185629)
 
 ## Intro
 
@@ -61,7 +47,7 @@ unique(basque$year)
 
 So the data form a complete panel of observations on ```{r}length(unique(basque$regionname))``` regions over ```{r}length(unique(basque$year))``` time periods.
 
-## Data Summaries
+## Data Summaries {.tabset}
 
 ### Outcome and Predictor Variables
 
@@ -211,6 +197,72 @@ basque %>% select(regionname, regionname, school.illit) %>% filter(regionname=='
 Something important to note here is that the [JSTATSOFT reference](https://www.jstatsoft.org/article/view/v042i13) says that X1 should be (13 X 1), X0 (13 X 16), Z1 (10 X 1), and Z0 (10 X 13). I'm reasonably sure these are just typos because the ouput displayed in the article (p.8 for reference) clearly has 14 predictors. 
 
 
+Here we follow [Abadie, Diamond, and Hainmueller](https://www.jstatsoft.org/article/view/v042i13) and perform some manipulations on the predictor variables using the output from ```dataprep.out()```. The authors state:
+
+> It may at times be useful to manipulate and modify X0 and X1 without going back to the original dataset. To demonstrate, we work with the five different education variables (school.illit, school.prim, school.med, school.high, school.post.high) representing the numbers, in thousands, of individuals with various levels of schooling. Abadie and Gardeazabal (2003) consolidate the two highest variables (school.high and school.post.high) to represent all those with more than high school education and use the percentage share for each predictor instead of the total number of individuals. The following code illustrates how to consolidate these variables in both X0 and X1 and transform the necessary values into percentage shares
+
+
+```{r}
+# scaling the 
+dataprep.out$X1["school.high",] <- dataprep.out$X1["school.high",] +
+ dataprep.out$X1["school.post.high",]
+
+ dataprep.out$X1 <- as.matrix(dataprep.out$X1[
+ -which(rownames(dataprep.out$X1) == "school.post.high"),])
+
+  dataprep.out$X0["school.high",] <- dataprep.out$X0["school.high",] +
+ dataprep.out$X0["school.post.high",]
+ 
+  dataprep.out$X0 <- dataprep.out$X0[
+ -which(rownames(dataprep.out$X0) == "school.post.high"),]
+ 
+  lowest <- which(rownames(dataprep.out$X0) == "school.illit")
+ 
+  highest <- which(rownames(dataprep.out$X0) == "school.high")
+ 
+  dataprep.out$X1[lowest:highest,] <- (100 * dataprep.out$X1[lowest:highest,]) /sum(dataprep.out$X1[lowest:highest,])
+ 
+  dataprep.out$X0[lowest:highest,] <-100 * scale(dataprep.out$X0[lowest:highest,], center = FALSE, scale = colSums(dataprep.out$X0[lowest:highest,]))
+
+```
+
+Next, the ```synth()``` method searches for the optimal $W*$:
+
+```{r}
+synth.out <- synth(data.prep.obj = dataprep.out, method = "BFGS")
+```
+
+A popular way to display Synthetic Control output is by plotting the trajectory of the affected unit relative to the trajectory of the sythentic control unit. We can do that in the ```snyth``` package by using the method ```path.plot()```:
+
+```{r}
+
+path.plot(synth.res = synth.out, dataprep.res = dataprep.out,
+ Ylab = "real per-capita GDP (1986 USD, thousand)", Xlab = "year",
+ Ylim = c(0, 12), Legend = c("Basque country",
+ "synthetic Basque country"), Legend.position = "bottomright")
+
+```
+
+However, if we prefer to do such things by hand, we can extract the critical elements of the object ```synth.out``` and feed them to ```ggplot```:
+
+```{r}
+# the time-series of GDP for the 16 "control" units is contained in dataprep.out$Y0 which is a Nyears X Nunits matrix
+# if we combine this matrix with the optimized weights from synth.out we get the "synthetic control unit"
+synth.path <- data.frame(dataprep.out$Y0 %*% synth.out$solution.w,unit="Synthetic Basque Country") %>% 
+                mutate(year=c(1955:1997))
+names(synth.path) <- c('gdp','unit','year')
+row.names(synth.path) <- c()
+treat.path <- data.frame(gdp=dataprep.out$Y1,unit="Basque Country") %>% mutate(year=c(1955:1997))
+names(treat.path) <- c('gdp','unit','year')
+row.names(treat.path) <- c()
+
+plot.df <- rbind(synth.path,treat.path) 
+
+ggplot(plot.df,aes(x=year,y=gdp,linetype=unit)) + geom_line() + geom_point() + 
+  theme_bw() + ylab("GDP")
+
+```
+
 ## Some Math
 
 Let:
@@ -222,6 +274,24 @@ Let:
 
 The effect of the intervention is $Y_{it}^I-Y_{it}^N=\alpha_{it}$.
 
+## Resources
+
+[Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program](https://economics.mit.edu/files/11859)
+
+Abadie, A., Diamond, A., Hainmueller, J. (2014). Comparative Politics and the Synthetic Control
+Method. American Journal of Political Science Forthcoming 2014.
+
+Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of
+Statistical Software 42 (13) 1–17.
+
+Abadie A, Diamond A, Hainmueller J (2010). Synthetic Control Methods for Comparative Case
+Studies: Estimating the Effect of California’s Tobacco Control Program. Journal of the American
+Statistical Association 105 (490) 493–505.
+
+[Abadie, A. and Gardeazabal, J. (2003) Economic Costs of Conflict: A Case Study of the Basque
+Country American Economic Review 93 (1) 113–132](https://economics.mit.edu/files/11870).
+
+[Impact of Drought on Crime in California](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0185629)
 
 
 
