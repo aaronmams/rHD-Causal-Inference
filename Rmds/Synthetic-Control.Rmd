@@ -1,0 +1,227 @@
+---
+title: "Synthetic-Control"
+author: "aaron mamula"
+date: "6/11/2020"
+output: html_document
+---
+
+[Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program](https://economics.mit.edu/files/11859)
+
+Abadie, A., Diamond, A., Hainmueller, J. (2014). Comparative Politics and the Synthetic Control
+Method. American Journal of Political Science Forthcoming 2014.
+
+Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of
+Statistical Software 42 (13) 1–17.
+
+Abadie A, Diamond A, Hainmueller J (2010). Synthetic Control Methods for Comparative Case
+Studies: Estimating the Effect of California’s Tobacco Control Program. Journal of the American
+Statistical Association 105 (490) 493–505.
+
+[Abadie, A. and Gardeazabal, J. (2003) Economic Costs of Conflict: A Case Study of the Basque
+Country American Economic Review 93 (1) 113–132](https://economics.mit.edu/files/11870).
+
+[Impact of Drought on Crime in California](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0185629)
+
+## Intro
+
+Synthetic Control is an inferential methodology for comparative cases studies. The technique has some high-level conceptual similarities to Difference-in-Differences estimators. A key difference between the two is that D-i-D generally attempts to uncover some "treatment effect" by matching treated units to similar untreated units. The canonical example is Card and Krueger, 1994 (Minimum wages and employment: A case study of the New Jersey and Pennsylvania fast food industries, *American Economic Review*). In contrast to D-i-D, Synthetic Control attempts to empirically construct a single comparable non-treated unit (using a linear combination of control units) in order to assess the credible counter factual. 
+
+
+## Methods
+
+In this exercise I'm following along with the sample code provided in [Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of Statistical Software 42 (13) 1–17](https://www.jstatsoft.org/article/view/v042i13). Most of the code in this workbook come directly out of that Journal Article.
+
+I have provided a high-level view of some of the math behind Synthetic Control. Since I suspect this will be the least interesting part of the Vignette, I have tucked the math-y stuff at the end.
+
+```{r}
+library(Synth)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(data.table)
+library(tidyr)
+data(basque)
+head(basque)
+```
+
+## Data
+
+Operationally, Synthetic Control organizes matricies according to cross-sectional units, time-periods, predictors, and outcome variables. Let's familiarize ourselves with the basic elements of the data:
+
+```{r}
+unique(basque$regionname)
+
+```
+
+So we have 18 unique regions. Measured over how many time-periods?
+
+```{r}
+unique(basque$year)
+```
+
+So the data form a complete panel of observations on ```{r}length(unique(basque$regionname))``` regions over ```{r}length(unique(basque$year))``` time periods.
+
+## Data Summaries
+
+### Outcome and Predictor Variables
+
+I'm not sure how informative this part will be but it's probably good practice to know something about how the data are distributed.
+
+The Basque Terrorism Study uses Per Capita GDP (```gdpcap```) as the outcome variable with the following predictor variables:
+
+* (gross total investment)/GDP (```invest```)
+* share of working age population that was illiterate, 1964-1969 avg. (```school.illit```)
+* share of working age population with up to primary school education, 1964-1969 avg. (```school.prim```)
+* share of working age population with some high school, 1964-1969 avg. (```school.med```)
+* share of working age population with high school education, 1964-1969 avg. (```school.high```)
+* share of working age populaiton with more than a high school education, 1964-1969 avg. (```school.post.high```)
+* Sector share: agricultural, forestry, and fishing (```sec.agriculture.1961.1969```)
+* Sector share: energy and water (```sec.energy.1961.1969```)
+* Sector share: industrial (```sec.industry.1961.1969```)
+* Sector share: construction and engineering (```sec.construction.1961.1969```)
+* Sector share: marketable services (```sec.services.venta.1961.1969```)
+* Sector share: non-marketable services (```sec.services.nonventa.1961.1969```)
+* Real GDP per capita, 1960-1969 avg. (```gdpcap```)
+* Population Density in 1969 (```popden```)
+
+Sector shares are calculated as the share of total production and measured as the 1961-1969 average.
+
+### Summary Stats
+
+This part does not appear in the [JSTATSOFT](https://www.jstatsoft.org/article/view/v042i13) vignette but I wanted to put it in mostly to feel like I'm contributing some value-added.
+
+Let's vizualize the sector production shares for the different regions:
+
+```{r}
+# squish the data into long format 
+plot.df <- basque %>% select(year,regionname,sec.agriculture,sec.energy,sec.industry,sec.construction,sec.services.nonventa,sec.services.venta) %>% filter(year >= 1961 & year  <= 1969) %>% 
+          group_by(regionname) %>%
+     pivot_longer(cols=starts_with("sec"),names_to="sector",values_to="count")
+
+# take the 1961 - 1969 avg. for each sector
+plot.df <- plot.df %>% group_by(regionname,sector) %>% 
+               summarise(mean=mean(count,na.rm=T))
+
+# make the sector name more informative
+plot.df <- plot.df %>% mutate(new.name=ifelse(sector=="sec.services.venta","Marketable Services",
+                                      ifelse(sector=="sec.services.nonventa","Non-marketable Services",
+                                      ifelse(sector=="sec.industry","Industry",
+                                      ifelse(sector=="sec.energy","Energy & Water",
+                                      ifelse(sector=="sec.construction","Construction","Agriculture"))))))
+
+ggplot(plot.df, aes(x=regionname,y=new.name,size=mean)) + geom_point(alpha=0.6) + 
+  theme_bw() + 
+  scale_size_continuous(breaks=c(0,10,20,30,50),name="Sector Share") + 
+  theme(axis.text.x=element_text(angle=90)) +
+  xlab("") + ylab("") 
+
+```
+
+Now let's look at the educational variables:
+
+```{r}
+#maybe just restrict attention to high school attainment
+plot.df <- basque %>% filter(year >= 1964 & year <= 1969) %>% 
+            select(regionname, year, school.high) %>% group_by(regionname) %>% 
+             summarise(school.high=mean(school.high,na.rm=T))
+
+# remove the "all of Spain" region
+ggplot(subset(plot.df,regionname!="Spain (Espana)"),aes(x=regionname,y=school.high)) + 
+  geom_bar(stat='identity',fill='tomato') +
+  coord_flip() + theme_fivethirtyeight() +
+  xlab("") + ylab("") + 
+  ggtitle(label = "Educational Attainment in Spain by Region",
+              subtitle = "percent of working age population completing high school") +
+  theme(plot.title = element_text(size = 16, face = "bold"))
+
+```
+
+## Synthetic Control with "Synth"
+
+The machinery of Synthetic Control uses optimization to find a set of weights that creates a unit which is as similar as possible to the treated unit in the pre-treatment period. 
+
+Here "similarity" is influenced by:
+
+1. The predictors we include in the model. This refers to the ```gdpcap```, ```popdens```, ```school.illit```, etc.
+2. The cross-sectional units we include in the universe of possible "controls".
+
+Again, the meat of Synthetic Control is to find an optimal weighting vector $W=[w_1,...w_N]$ which will be applied to the predictor values of the control units. The following matricies are critical to the implementation:
+
+* $X_1$, a (k X 1) vector predictor values for the treated unit
+* $X_0$, a (k X J) matrix of predictor values for the control units
+* $Z_1$, a ($T_P$ X 1) vector of outcome variables for the treated unit in the pre-treatment period
+* $Z_0$, a ($T_P$ X J) matrix of outcome variables for the control units in the pre-treatment period
+
+Here the general notation $T_P$ is used to define the pre-treatment period because the ```synth``` user can define which pre-treatment time periods they wish to use to construct the sythetic control.
+
+The objects $X_1$, $X_0$, $Z_0$, $Z_1$ can be supplied individually to different methods within in the ```synth``` library. But that would make things harder than they need to be because the ```synth``` method ```dataprep()``` will prepare the synthetic control data for you.
+
+```{r}
+dataprep.out <- dataprep(
+ foo = basque,
+ predictors = c("school.illit", "school.prim", "school.med",
+ "school.high", "school.post.high", "invest"),
+ predictors.op = "mean",
+ time.predictors.prior = 1964:1969,
+ special.predictors = list(
+ list("gdpcap", 1960:1969 , "mean"),
+ list("sec.agriculture", seq(1961, 1969, 2), "mean"),
+ list("sec.energy", seq(1961, 1969, 2), "mean"),
+ list("sec.industry", seq(1961, 1969, 2), "mean"),
+ list("sec.construction", seq(1961, 1969, 2), "mean"),
+ list("sec.services.venta", seq(1961, 1969, 2), "mean"),
+ list("sec.services.nonventa", seq(1961, 1969, 2), "mean"),
+ list("popdens", 1969, "mean")),
+ dependent = "gdpcap",
+ unit.variable = "regionno",
+ unit.names.variable = "regionname",
+ time.variable = "year",
+ treatment.identifier = 17,
+ controls.identifier = c(2:16, 18),
+ time.optimize.ssr = 1960:1969,
+ time.plot = 1955:1997)
+
+```
+
+
+The ```dataprep()``` function creates the critical objects mentiond above. We'll verify this by looking at the ```dataprep.out``` object.
+
+```{r}
+str(dataprep.out)
+```
+
+There's a lot of stuff there but we can see the objects $X_0$, $X_1$, $Z_0$, $Z_1$ towards the top:
+
+```{r}
+dataprep.out$X0
+```
+
+As expected, $X0$ is a (14X16) matrix.  
+
+One note here: although the authors described the schooling variables on page 6 as "share of working age population", we can see that these are clearly not shares. On page 9 the authors state, 
+
+>...To demonstrate, we work with the five different education variables (school.illit, school.prim, school.med, school.high, school.post.high) representing the numbers, in thousands, of individuals with various levels of schooling... 
+
+
+```{r}
+basque %>% select(regionname, regionname, school.illit) %>% filter(regionname=='Andalucia') %>% 
+   group_by(regionname) %>% summarise(school.illit=mean(school.illit,na.rm=T))
+```
+
+Something important to note here is that the [JSTATSOFT reference](https://www.jstatsoft.org/article/view/v042i13) says that X1 should be (13 X 1), X0 (13 X 16), Z1 (10 X 1), and Z0 (10 X 13). I'm reasonably sure these are just typos because the ouput displayed in the article (p.8 for reference) clearly has 14 predictors. 
+
+
+## Some Math
+
+Let:
+
+* $Y_{it}^N$ be the outcome for state $i$ in the absence of the policy
+* $T^0$ is the time-period of intervention such that $t \in (1,...,T^0)$ is the pre-treatment period
+* $Y_{it}^I$ is the outcome for state $i$ if the state were exposed to the policy intervention
+* it is assumed that the treatment has no effect before implementation so $Y_{it}^N=Y_{it}^I$ for $t \in (1,...T^0)$
+
+The effect of the intervention is $Y_{it}^I-Y_{it}^N=\alpha_{it}$.
+
+
+
+

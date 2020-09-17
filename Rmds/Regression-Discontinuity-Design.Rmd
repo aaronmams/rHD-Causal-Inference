@@ -1,0 +1,296 @@
+---
+title: "Regression-Discontinuity-Design"
+author: "aaron mamula"
+date: "6/17/2020"
+output: html_document
+---
+
+This Vignette attempts to reproduce analysis from [The Analysis of Regression Discontinuity Design](https://files.eric.ed.gov/fulltext/EJ1141190.pdf), a paper by Felix Thoemmes, Wang Liao, and Ze Jin published in *Journal of Educational and Behavioral Statistics*. I suspect the R Code for this paper is available somewhere but what I've provided here is my best attempt at replicating paper results using my own understanding of the R package ```rdd``` and ```rddtools```. 
+
+# {.tabset .tabset-fade .tabset-pills}
+
+## Intro {.tabset}
+
+In this exercise we are going to look at some data on schooling outcomes and early childhood intervention.  The data we will use come from two randomized experiments on early childhood intervention (The Carolina Aberdecian Project and Carolina Approach to Responsive Education).  Participants in the study were randomly selected to receive one or more educational treatments.  The study was pretty interesting and definitely worth reading more about...but a lengthy background is probably unnecessary here.
+
+This exercise is focused on estimating the effect of early childhood interventions on educational outcomes.  Specifically, we will focus on the treatment variable *dc_trt* which indicates whether the subject was chosen to receive the Day Care Treatment.  
+
+### Outline
+
+Here is what they did in the [The Thoemmes et al. paper](https://files.eric.ed.gov/fulltext/EJ1141190.pdf) and what we are doing here:
+
+1. take data from a well-known set of randomized experiments and look at it
+2. create a non-randomized data sample
+3. measure the "true" treatment effect from the randomized data
+4. use the non-random fake data to illustrate the process of applying regression discontinuity methods to estimate a local average treatment effect (LATE).
+
+### R Prerequisites
+
+* data manipulatin with dplyr
+* data visualization with ggplot2
+* linear models (OLS regression) in R with the lm() function
+
+### R Skills
+
+* data manipulation with memisc
+* smoothing with Lowess (local polynomial regression)
+* McCrary discontinuity tests with the rdd package
+* estimation of RDD models with the rdd and rdtools packages
+
+### Analytical Skills
+
+* basic comfort with regression discontinuity designs
+* estimation of local average treatment effects with RDDs
+* McCrary test for continuity of assignment variable
+
+```{r include=F}
+library(viridis)
+library(rdd)
+library(rddtools)
+library(dplyr)
+library(memisc)
+library(ggplot2)
+library(ggthemes)
+library(here)
+```
+
+### Empirical strategy
+
+The Abecedarian and CARE projects were randomized experiments. We are going to artifically create a non-randomized trial in order to apply Regression Discontinuity Methods. We are going to suppose that children with mother's having an IQ below 85 (the median IQ in the data sample) were selected to receive free daycare. Children in the sample with mother's having an IQ of 85 or above did not receive the treatment.
+
+This mirrors how many social programs work. In education it seems sensible to try and identify children who may be disadvantaged in the educational system and implement some strategy to counter-act this. The empirical challenge that this creates is that, since the treatment is non-randomly assigned, it can be difficult to estimate the marginal impact of the intervention. Regression Discontinuity Designs are one approach for estimating average treatment effects when treatments are non-randomly assigned.
+
+Where practical implementation is concerned, there is a really cool paper by Thoemmes, Liao, and Jin (2017) that uses the Abecedarian Project data and CARE data to illustrate use of RDD tools in R. This R Notebook uses that paper as a guide and tries to reproduce the paper's results. 
+
+## Examining the data {.tabset}
+
+The data for this exercise comes from a panel data study of early childhood interventions: *The Carolina Abecedarian Project and the Carolina Approach to Responsive Education (CARE), 1972-1992*.  Details on this study as well as data files can be found [here](https://www.icpsr.umich.edu/icpsrweb/ICPSR/studies/4091).  
+
+### Reading the data into R
+
+I have stored the primary data file in this project directory. I have a more comprehensive GitHub Repository on "Estimating Average Treatment Effects." If you care to clone that repo it is here:
+
+https://github.com/aaronmams/treatment-effects
+
+The data are available as an SPSS portable file (.por).  I use the *memisc* package in R to read this file format.
+
+```{r}
+RDD.df <- tbl_df(as.data.frame(as.data.set(spss.portable.file(here('data/04091-0001-Data.por')))))
+
+RDD.df
+```
+
+These data have 176 observations of 119 variables. Each row in the data frame is an individual and columns contain individual specific information, intervention/treatment status, and observed outcomes.  
+
+### Exploring treatment status
+
+According to the codebook, there were a menu of possible interventions:
+
+>The Abecedarian study randomized subjects into DAYCARE TREATMENT (treatment versus control) and SCHOOLAGE TREATMENT (treatment, control,  and not assigned: subjects left study before receiving an assignment). These two factors are crossed, forming six groups in all. No Abecedarian subjects received Home Visits, so HV_TRT is always "0".
+
+>The CARE study randomized subjects into three groups: DAYCARE TREATMENT plus HOME VISIT TREATMENT plus SCHOOLAGE TREATMENT, HOME VISIT TREATMENT plus SCHOOLAGE TREAMENT, and CONTROL (no treatment of any kind).
+
+Let's examine how many units are in each treatment group:
+
+```{r}
+RDD.df %>% group_by(STUDY,DC_TRT,SA_TRT,HV_TRT) %>% summarise(count=n()) 
+
+```
+
+My take away from this is that there are 111 total study subjects and 6 possible groupings in the *Abecedarian* study:
+
+* 23 of those did not receive either treatment (Day Care Treatment or Schoolage Treatment)
+* 25 subject received both treatments
+* 48 received at least 1 but not both treatments
+
+There are 65 study subjects distributed among 3 groups in the CARE study:
+
+* 23 subjects received no treatment of any kind
+* 26 received only the Schoolage Treatment and the Home Visit Treatment
+* 16 received all 3 possible treatments
+
+### Exploring Covariates
+
+There are 119 variables in this data set...far too many to explore individually.  Here we will take a quick look at distributions for a few of the more notable covariates:
+
+* Gender
+* Mother's Age
+* Mother's WAIS score at time of subject's birth (Mom's IQ)
+* Standford - Binet IQ score at 24, 36, adn 48 months.
+
+```{r}
+
+ggplot(RDD.df,aes(x=MOMSAGE)) + geom_bar() + xlab("Mom's Age")
+ggplot(RDD.df,aes(x=MOMWAIS0)) + geom_density() 
+ggplot(RDD.df,aes(x=MOMWAIS0,y=SBIQ24)) + geom_point() + geom_smooth() + theme_bw() +
+   xlab("Mom's IQ") + ylab("Subject IQ at 24 months")
+```
+
+
+## RDD Example {.tabset}
+
+### Simulate Data
+
+We simulate an RDD by supposing that selection into the treatment groups was done based on a threshold value of mother's IQ.  That is, we suppose that the treatments were assigned to mothers with IQ scores below the median score of the sample.  
+
+
+```{r}
+RDD.sim <- RDD.df %>% filter(
+                (MOMWAIS0 >= median(MOMWAIS0) & DC_TRT=='Control') |
+                  (MOMWAIS0 < median(MOMWAIS0) & DC_TRT=='Treatment'),!is.na(SBIQ48))
+```
+
+This is a "sharp RDD."  Let's take a look at an overly simplified way of evaluating the treatment effect: a local smoothing trend.  
+
+The following appears as Figures 3a and 3b in [the aforementioned Thoemmes, Liao, and Jin (2017) paper](https://files.eric.ed.gov/fulltext/EJ1141190.pdf).
+
+```{r}
+ggplot(RDD.df,aes(x=MOMWAIS0,y=SBIQ48,group=DC_TRT,color=DC_TRT,shape=DC_TRT)) + geom_point() + 
+  geom_point(size = 2) +
+  geom_smooth(method = "loess",
+             formula = y ~ x,
+             aes(linetype = DC_TRT)) + theme_bw() + ylab("Child IQ at age 2") +
+             xlab("Mother’s IQ\n\n(a)") +
+             xlim(c(60, 110)) + ylim(c(60, 130)) +
+             scale_colour_manual(values = c("darkgrey", "black")) +
+             theme(legend.position = "none")
+```
+
+```{r}
+ggplot(RDD.sim) +
+  aes(
+     x = MOMWAIS0,
+     y = SBIQ48,
+     group = DC_TRT,
+     color = DC_TRT,
+     shape = DC_TRT
+  ) +
+geom_point(size = 2) +
+geom_smooth(method = "loess",
+            formula = y ~ x,
+            aes(linetype = DC_TRT)) + 
+  theme_bw() + ylab("Child IQ at age 2") +
+            xlab("Mother’s IQ\n\n(b)") + xlim(c(60, 110)) + ylim(c(60, 130)) +
+            scale_colour_manual(values = c("darkgrey", "black")) +
+            theme(legend.title = element_blank()) 
+
+```
+
+
+The sharp RDD is evident in the 2nd plot where all subjects with Mother's with an IQ score below 85 get the treatment and all subjects with Mother's with an IQ score at or above 85 are controls.
+
+### The "True" Treatment Effect:
+
+Since the original data comes from a randomized experiment, the difference in grouped means gives us an unbiased estimate of the average treatment effect. 
+
+```{r}
+#naive treatment effect from RDD data
+lm_naive = lm(SBIQ48 ~ DC_TRT, RDD.df)
+summary(lm_naive)
+```
+
+Things to note here:
+
+1. the original study was a randomized control experiment...so the average treatment effect of the interventions can be estimated without regard to selection into groups
+
+2. our hypothetical example is more like an observational study where selection into groups is a concern
+
+3. so the estimate above of 9.88 IQ points is a baseline against which our RDD estimates will evenutally be measured
+
+### A McCrary Test
+
+This section presents the McCrary Test for continuity of assignment.
+
+The McCrary test was developed by [McCrary 2008](https://eml.berkeley.edu/~jmccrary/mccrary2006_DCdensity.pdf) and tests for continuity of the assignment variable (in this case Mother's IQ). This continuity is an important assumption of of the RDD framework.  
+
+The basic concern here is that if selection into the treatment group can be gamed, we will end up with lots of people (relative to expectations) who just barely qualify for the treatment group and few people (relative to expectations) who just barely don't qualify for the treatment.  Since the whole point of RDDs is to compare what happends to subject who are just below versus just above the treatment cutoffs, it would be bad to have subjects be able to 'game the system.'
+
+The classic example here is the 'mercy pass' example.  Suppose students are assigned to summer school based on final grade.  If the teacher gives a 'mercy pass' to students who are very close to the cutoff we will end up a relatively high number of students just barely on the right side of the cutoff (those who do not receive the summer school treatment) and relatively few students on the left side of the cutoff (those who do receive the treatment). If the students just on the right side of the cutoff are students for which the treatment would have been beneficial (because they were supposed to receive the treatment) then the RDD estimate of the impact of summer school on student performance will be baised.
+
+The following appears as Figure 4 in [the aforementioned Thoemmes, Liao, and Jin (2017) paper](https://files.eric.ed.gov/fulltext/EJ1141190.pdf).
+
+```{r}
+
+#McCrary sorting test as implemented in RDD
+rdd::DCdensity(RDD.sim$MOMWAIS0, median(RDD.df$MOMWAIS0), ext.out = TRUE)
+```
+
+The output of the McCrary test gives a statistical testing and a graphical illustration. The null hypothesis of the McCrary test is of continuity in the distribution of assignment variable. In this case it finds $z$=1.16 with $p$ = 0.244 indicating failure to reject the hypothesis of continuity.
+
+### Placebo Test
+
+Placebo test for local average treatment effects (LATE).
+
+Another important identifying assumption for RDDs is that the treatment effect only occurs at the cutoff. We can use placebo tests from the [rddtools](https://cran.r-project.org/web/packages/rddtools/rddtools.pdf) package to test whether this assumption holds.
+
+The following appears as Figure 5 in [Thoemmes, Liao, and Jin (2017) paper](https://files.eric.ed.gov/fulltext/EJ1141190.pdf).
+
+```{r}
+
+#the rddtools package needs data to be loaded as an rdd_data object
+
+dat_rddtools = rddtools::rdd_data(
+  y = SBIQ48,
+  x = MOMWAIS0,
+  data = RDD.sim,
+  cutpoint = median(RDD.df$MOMWAIS0)
+)
+
+llm_rddtools = rddtools::rdd_reg_np(dat_rddtools)
+
+rddtools::plotPlacebo(llm_rddtools,
+                      same_bw = T,
+                      from = .25,
+                      to = .75)
+```
+
+Placebo tests basically ask the question, "what if we estimated the model with the wrong cutoff point."  The idea behind the placebo test is to do something you think is right (estimate the model with the correct cutoff point) then do a bunch of things you think are not right (estimate the model with different cutoff points).  If you get a significant estimate from a 'wrong model' then it strongly suggests that the results of your 'right model' cannot be trusted.
+
+Here we see that for estimates of the local average treatment effect using a variety of other cutoff points are insignificant (the confidence intervals generally include 0).  But the LATE estimated at the correct cutoff point does appear significant.
+
+### Estimate the LATE
+
+Finally, we directly address the research question by estimating the local average treatment effect associated with early childhood intervention.
+
+```{r}
+# RDestimate() uses local linear regression to estimate the RDD model.
+# default option is bandwith calculated by Imbens-Kalyanaraman method...user can #   change
+# default kernel for local linear fit is triangular...user can change
+# options are cataloged here:
+# https://www.rdocumentation.org/packages/rdd/versions/0.57/topics/RDestimate
+lm_rdd = rdd::RDestimate(SBIQ48 ~ MOMWAIS0, RDD.sim,
+                         cutpoint = median(RDD.df$MOMWAIS0))
+summary(lm_rdd)
+
+#plot of RDD as implemented in RDD
+plot(lm_rdd)
+```
+
+The local average treatment effect is estimated here to be -9.085 and is statistically significant.  Recall that the reference estimate from the controlled experiment was about 9.8 so our LATE from RDD is pretty close.  The estimate from the rdd package is negative because Child's IQ at the cutoff drops.  This says that, at the cutoff, the IQ values for the treated groups are about 9 points higher than what we would expect to observe in the absence of the treatment.
+
+#### Quick note on cleaning up the default plot
+
+The plot above is somewhat helpful but hard to change the defaults.  We can produce a similar plot using basic ggplot options and a Loess smoothing span of 1:
+
+```{r}
+
+ggplot(RDD.sim,aes(x=MOMWAIS0,y=SBIQ48,group=DC_TRT,color=DC_TRT)) + geom_point() + 
+  geom_smooth(method='loess', span=1) + theme_dark() + 
+  scale_color_viridis_d(option='cividis',name='Treatment') +
+  xlab("Mother's IQ") + ylab("Child's IQ")
+
+
+```
+
+## Resources
+
+1. [This paper](https://files.eric.ed.gov/fulltext/EJ1141190.pdf) that I've linked to throughout the lesson.  
+
+2.  [Mastering Metrics](http://www.masteringmetrics.com/) by Josh Angrist and Jorn-Steffen Pischke
+
+3. [The rdd package](https://cran.r-project.org/web/packages/rdd/rdd.pdf)
+
+4. [The "Econometrics with R" page](https://www.econometrics-with-r.org/13-4-quasi-experiments.html) has a whole section on "Quasi-experiments"
+
+5. [My GitHub repository](https://github.com/aaronmams/treatment-effects) has some code related to propensity score matching, potential outcome means estimators, and a little matching. Apologies for the shameless self promotion. 
+

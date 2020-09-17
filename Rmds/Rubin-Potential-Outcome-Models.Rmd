@@ -1,0 +1,328 @@
+---
+title: "Recipe-Rubin-Potential-Outcome-Models"
+author: "aaron mamula"
+date: "6/17/2020"
+output: html_document
+---
+
+# {.tabset .tabset-fade .tabset-pills}
+
+This workbook has some sample R code to illustrate a few different treatment effect estimators. Specifically, we cover the following 4 topics that are often presented as part of the [Rubin-Neyman Potential Outcome Framework](https://link.springer.com/chapter/10.1057/9780230280816_28).  
+
+1. Regression Adjustment (sometimes called a Potential Outcome Mean estimtor)
+2. Inverse probability weighted means
+3. Propensity Scores as regression weights
+4. Propensity Score Matching
+
+What I will attempt to illustrate (using R code) here is the use of these 4 techniques in uncovering an Average Treatement Effect. 
+
+
+## Introduction {.tabset}
+
+### Extended Background and Methods
+
+This workbook present a few simple ways to evaluate average treatment effects when some covariates are correlated with both the assignment to treatment and the outcome variable. This is sometimes refered to as sample selection bias or the self selection problem.Let's consider the example from Matai Cattaneo's 2010 *Journal of Econometrics* study of the effect of smoking during pregnancy on babys' birthweights. The precise empirical problem posed here is that women choose whether or not to smoke, so assignment into treatment and control groups may be non-random. Moreover, the probability of receiving the treatment (smoke v. not smoke) may be correlated with other variables in the model (like age) which are also correlated with the outcome. This is sometimes refered to as a confounding variables problem.  
+
+In order to conduct causal inference on the impact of smoking on birthweight we need to estimate the unconditional mean for each group (treatment and control).  What we observe is the outcome conditional on receiving the treatment or not. In expirimental studies assignment into treatment-control groups is random and therefore uncorrelated with the outcome. In this case, mean outcomes conditional on the treatment estimate the unconditional mean of interest. In observational studies, if the assignment to treatment-control groups is non-random we need to model this assignment (called the treatment model). If our treatment model is any good than the assignment to treatment conditional on covariates can be considered random and estimates of the unconditional group means can be obtained.
+
+
+###  Outline
+
+This workbook illustrates a few approaches for estimating average treatment effects using observational data when self selection into the treatment grouping is a concern. The workbook proceeds as follows:
+
+1. First, I use some well-separated simulated data to draw a few pretty pictures of the core problem (non-random assignement into groups)
+
+2. Next, I use some 'real world' data (the Cattaneo (2010) smoking and birthweight data), and R functions, to illustrate the following strategies for estimating an average treatment effect:   
+
+1. The Regression Adjustment (RA) or Potential Outcome Mean (POM) Approach
+2. Comparison of weighted group means using inverse probability weights
+3. Regression adjustment using propensity scores
+4. Propensity Score Matching
+
+In this latter section where I try to produce some actual estimates of Average Treatement Effects from data, I draw pretty heavily on a few STATA resources that also use the Cattaneo (2010) data in an illustrative context:
+
+* [This STATA presentation by Dr. Drukker](https://www.stata.com/meeting/nordic-and-baltic13/abstracts/materials/se13_drukker.pdf) will be a good reference point for us.
+* [This STATA Blog Post](https://blog.stata.com/2015/07/07/introduction-to-treatment-effects-in-stata-part-1/#disqus_thread) also explores the Cattaneo data, and
+* [The STATA Manual section on the STATA teffects module](https://www.stata.com/manuals13/teteffectsra.pdf) has some examples that will be helpful in benchmarking my estimates.
+
+```{r include=F}
+#load some libraries
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(ggthemes)
+library(here)
+```
+
+## Data 
+
+The data we will use is from from Matai Cattaneo's 2010 *Journal of Econometrics* study. These data contain, among other things, measurements on birthweight of 4,642 newborn babies, maritial status of the mother, age of the mother, and smoking status (smoked v. did not smoke during pregnancy).
+
+Let's get a quick look at the data:
+
+```{r}
+df <- tbl_df(read.csv(here('data/cattaneo2.csv')))
+print.data.frame(df[1:5,])
+
+```
+
+These data contain a lot more non-smokers than smokers, and the smokers tend to be a little younger. 
+
+```{r}
+ggplot(df,aes(x=mage,fill=mbsmoke)) + geom_density(alpha=0.3) + theme_bw() +
+  scale_fill_viridis_d(name='Smoker Status') + xlab("Mother's Age")
+```
+
+```{r}
+ggplot(df,aes(x=mage,y=bweight,color=factor(mbsmoke))) + geom_point() + geom_smooth(method='lm') + ylab("birthweight") + 
+  xlab("mother's age") + scale_color_viridis_d(name="Smoker") + theme_dark()
+
+```
+
+## Toy Problem
+
+The Cattaneo data are cool because they are 'real life' but they aren't very well separated...so they don't make for a great illustration of the problem. 
+
+The estimation of average treatment effects is often complicated by the issue of non-random assignment to treatment and control groups. Here we illustrate this problem using some simulated data on baby's birthweight and mother's age and smoker/non-smoker status. Let's suppose that older mothers are more likely to smoke (read: more likely to receive the treatment) but older mothers also tend to give birth to heavier babies.
+
+```{r}
+#generate some data to illustrate the potential observed mean, probability of 
+#   being a smoker increases with age
+
+age=rnorm(100,30,5)
+
+#make the probability that a mother smokes increase with age
+psmoke <-  pnorm((age-mean(age))/sd(age)) 
+smoke <- rbinom(100,1,psmoke) 
+
+#create a dataframe where birthweight is an increasing function of both mother's
+#   age and smoking status 
+z <- data.frame(age=age,smoke=smoke,bw=3000+(5*age)+(25*smoke) + rnorm(100,100,25))
+
+#plot birthweight for smokers and non-smokers 
+ggplot(z,aes(x=age,y=bw,color=factor(smoke))) + geom_point() + geom_smooth(method='lm') + ylab("birthweight") + 
+  xlab("mother's age") + scale_color_viridis_d(name="Smoker") + theme_dark()
+
+```
+
+If we are interested in an unbiased estimate of the impact of smoking on birthweight the plot above suggests some issues...namely that we don't have very many smokers on the low end of the age distribution and, relatedly, we don't have many non-smokers in the high end of the age distribution.
+
+### IPW for the Toy Problem
+
+In general, the Treatment Model can be specified many ways.  In the simulated (toy) problem older mothers were more likely to be smokers. In this case, we could model selection into the 'treatment' group according to the probit model:
+
+$P(Y=1|Age) = \Phi(\alpha + \beta age)$,
+
+where $\Phi$ is the cumulative density function for the standard normal distribution.
+
+The idea is to weight observations according to the inverse of thier probability of being included in the sample. Outcomes from smokers will be weighted by $\frac{1}{p_i}$. In the plot below we can see that this will attach a higher weight to outcomes from younger smokers. Conversely, we will weight outcomes from non-smokers by $\frac{1}{1-p_i}$...this attaches a higher weight to older non-smokers. In our simulated data sample is skewed by the fact that older mothers are more likely to smoke and more likey to have heavier babies. 
+
+The inverse probability weight correction deals with this by attaching higher weights to observations that are underrepresented in the sample (non-smoking older mothers and smoking younger mothers).  
+
+```{r}
+#start with the same fake data we used to illustrate the POM estimator
+age=rnorm(100,30,5)
+psmoke <-  pnorm((age-mean(age))/sd(age))
+smoke <- rbinom(100,1,psmoke)
+z <- data.frame(age=age,smoke=smoke,bw=3000+(5*age)+(25*smoke) + rnorm(100,100,25))
+
+#calculate probability weights: fit a logit model and probit then use the fitted values as 
+# probabilities
+logit.bw <- glm(smoke~age,data=z,family='binomial')
+probit.bw <- glm(smoke~age,data=z,family=binomial(link='probit'))
+pi <- predict(probit.bw,newdata=z,type="response")
+
+#weight smokers by 1/p(i) so that weight is large when probability of being a smoker is
+# small.  Weight observations on non-smokers by 1/(1-p(i)) so weights are large when 
+# probability is small
+z <- tbl_df(z) %>% mutate(w=pi) %>% 
+    mutate(weight=ifelse(smoke==1,1/w,1/(1-w)))
+
+ggplot(z,aes(x=age,y=bw,color=factor(smoke),size=weight)) + geom_point(shape=1) + 
+  theme_tufte() +
+  scale_color_manual(name="Smoker Status",values=c("red","black")) + ylab("birthweight") 
+
+```
+
+## ATE with RA
+
+So now I'm going to return to the Cattaneo smoking and birthweight data set. I'm doing this because I have [some examples from the STATA Manual](https://www.stata.com/manuals13/teteffectsra.pdf) to compare my results to (as a sort of 'red face' check).
+
+Rubin has describe causal inference as a missing data problem. In this case, we are "missing" what would have happened to the non-smokers' babies if those mothers had been smokers. And also what would have happenend to the smokers' babies if those mothers had been non-smokers. 
+
+The idea behind the Regression Adjustment approach or POM approach is to estimate a linear model for the treated population and use that model to construct the counterfactual outcome for the non-treated population. Then estimate a linear model for the non-treated population and use that model to construct the counterfactual outcome for the treated population.
+
+I realize that my graphical illustration from the last section used age and birthweight. Please note that I'm switching the model a bit here to conform to what the [STATA Manual](https://www.stata.com/manuals13/teteffectsra.pdf) section on Regression Adjustment has. I'm doing this in order to generate results that are comparable to something. For reference the STATA Manual reports an estimated ATE of -239.63 for this problem.
+
+```{r}
+# estimate a linear model using only the treated population then use the predict() 
+#    method to impute values for both populations
+lm.smoker <- lm(bweight~mmarried+prenatal1+fbaby,data=df[df$mbsmoke=='smoker',])
+pred.smoker <- predict(lm.smoker,newdata=df)
+
+# Now estimate a linear model for the non-treated population then use the predict()
+#   method to impute values for both populations
+lm.ns <- lm(bweight~mmarried+prenatal1+fbaby,data=df[df$mbsmoke!='smoker',])
+pred.ns <- predict(lm.ns,newdata=df)
+
+#ATE using the POM approach is just the difference in mean fitted values for smokers and 
+#   non-smokers using the two different regression models. Note that what I have here is
+#  pair-wise difference. So each value here is E[bw_i|smoke_i=1] - E[bw_i|smoke_i=0] and 
+#   then we take the mean of those values (the average treatement effect)
+ate <- mean(pred.smoker-pred.ns)
+ate
+
+```
+
+## ATE with Propensity Scores {.tabset}
+
+Another popular way of correcting for non-random assignment to treatment/control groups is to use propensity score weighting.  
+
+The propensity score is the estimated probability that an individual with certain characteristics will receive the treatment. We do this in two parts: first we estimate a model that predicts the probability that each invidual will be included in the treatment group conditional on some covariate values. This is generally called the Treatment Model.  
+
+### IPW Means
+
+In the following chunk we estimate the Average Treatment Effect with our Cattaneo (2010) data using the inverse probability weights to adjust the means. 
+
+NOTE: I'm circling back to [this STATA Vignette](https://www.stata.com/meeting/nordic-and-baltic13/abstracts/materials/se13_drukker.pdf), which reports an estimated ATE of -231.1516 using the Inverse Probability Weighting approach.
+
+```{r}
+#Treatment Model
+
+#use the probit link for probability weights like they do in the STATA blog
+probit.bw <- glm(factor(mbsmoke)~mmarried+prenatal1+fbaby+medu,data=df,family='binomial'(link='probit'))
+
+# the predicted probability of receiving the treatment is assessed for each individual according to the parameters of the probit model above.
+pi <- predict(probit.bw,newdata=df,type="response")
+
+#add inverse probability weights to the data frame
+df <- tbl_df(df) %>% mutate(w=pi) %>% mutate(weight=ifelse(mbsmoke=='smoker',1/w,1/(1-w)),
+                                             z=ifelse(mbsmoke=='smoker',1,0))
+
+#Average Treatment Effect based on weighted average of groups: 
+#Reference: http://onlinelibrary.wiley.com/doi/10.1002/sim.6607/epdf
+weighted.mean.smoker <- (1/(sum(df$z/df$w)))*sum(df$z*df$bweight/df$w)
+weighted.mean.ns <- (1/sum(((1-df$z)/(1-df$w))))*(sum(((1-df$z)*df$bweight)/(1-df$w)))
+
+#ATE
+weighted.mean.smoker - weighted.mean.ns
+
+```
+
+### Propensity Scores as Regression Weights
+
+We can also use the propensity score as a regression adjustment. A good reference for this estimator is http://www.stat.columbia.edu/~gelman/stuff_for_blog/posner.pdf.  
+
+Using the propensity score as a regression adjustment simply amounts to including the propensity score ($p_i$) in a regression of birthweight on mother's age.
+
+In the chunk below the treatment model is specified as a probit model where the [0,1] outcome smoker v. non-smoker is modeled as a function of age, age squared, marital status, education level, and an indicator for whether the mother has had a baby before. Parameter estimates from this model are used to generate a predicted probability of smoking for each individual in the sample. This predicted probability is the propensity score.
+
+```{r}
+#the treatment model
+pscore.df <- df %>% mutate(mage2=mage*mage) %>%
+        mutate(marriedYN=ifelse(mmarried=='married',1,0),
+               prenatal1YN=ifelse(prenatal1=='Yes',1,0))
+
+#ipwra.treat <- glm(factor(mbsmoke)~mage+marriedYN+fbaby+mage2+medu,data=pscore.df,family=#'binomial'(link='probit'))
+
+ipwra.bw <- glm(factor(mbsmoke)~mmarried+prenatal1+fbaby+medu,data=df,family='binomial'(link='probit'))
+pi <- predict(ipwra.bw,newdata=df,type="response")
+
+df$pi <- pi
+pscore.df <- df %>% mutate(w=ifelse(mbsmoke=='smoker',1/pi,1/(1-pi)))
+
+#Birthweight regression adjusted using the propensity score
+summary(lm(bweight~mbsmoke+mmarried+prenatal1+fbaby+medu,data=pscore.df,
+           weights=w))
+```
+
+### Propensity Score Matching
+
+The intuition and mechanics of Propensity Score Matching are pretty simply to understand. The statistical foundations (i.e. how to do PSM right) are pretty complex. My understanding of causal inference doesn't come close to a Paul Rosenbaum, Don Rubin, Andrew Gelman, or Judea Pearl...so I'm not going to preface this discussion of PSM with a lot of cautionary tales. I'm not going to run through a big list of 'potential pitfalls' or common violations of the ignorability condition. I'm just going to walk through the nuts-and-bolts of how to take our birthweight data and estimate an average treatment effect using PSM.
+
+I tried to make sure that the statistical minutia of propensity score matching is appropriately represented in the *Resources* section.
+
+A typical propensity score matching application goes something this:
+
+1. run a probit or a logit regression modeling the assignment to treatment $z /in (0,1)$ as a function of covariates $x$.
+2. using the regression in 1, generate a predicted probability of receiving the treatment for each observation in the sample.
+3. match treated units to untreated units using the propensity score.  NOTE: there are a number of options for carrying out this matching (many-to-one match, one-to-many match, one-to-one match, nearest neighbor match, Mahalanobis distance, etc.)
+4. examine the covariate balance in the matched data...interestingly, there seem to be a rash of PSM applications that don't offer much advice in way of what to do if your model doesn't provide good covariate balance.
+5. compare group means in the matched data.
+
+
+Step 0: read in the data...I know this is a little repetitive...I should probably clean this up but for now just live with it please.
+
+```{r}
+library(MatchIt)
+#read the Cattaneo2.dta data set in
+df <- tbl_df(read.csv(here("data/cattaneo2.csv"))) %>% 
+      mutate(smoker=ifelse(mbsmoke=='smoker',1,0))
+
+```
+
+Steps 1 and 2: run the logit model and get the predicted probability of receiving the treatment (propensity score).
+```{r}
+#use mother's age, marital status, and education level to predict smoke/non-smoke
+smoke.model <- glm(smoker~mage+medu+mmarried,family=binomial, data=df)
+
+pr.df <- data.frame( pr_score = predict(smoke.model, type = "response"),
+                      smoke = df$smoker )
+
+```
+
+Step 3: use the 'MatchIt' package to match treated units to similar non-treated units
+
+```{r}
+#The 'MatchIt' package will perform the actual propensity score matching for us:
+m.out <- matchit(smoker ~ mage + medu + mmarried,
+                 method = "nearest", data = df)
+
+#match.data creates a dataframe with only the matched obs
+matched <- match.data(m.out)
+
+```
+
+Step 4: examine the covariate balance.  In a good PSM study the covariate distributions conditional on propensity score should be similar across groups.
+
+```{r}
+
+#inspect the covariate balance
+ggplot(matched,aes(x=distance,y=mage,color=mbsmoke)) + geom_point(alpha=0.4,size=1.5) + geom_smooth() +
+  theme_bw() + scale_color_manual(values=c('red','black'))
+
+ggplot(matched,aes(x=distance,y=medu,color=mbsmoke)) + geom_point(alpha=0.4,size=1.5) + geom_smooth() +
+  theme_bw() + scale_color_manual(values=c('red','black'))
+
+```
+
+
+Step 4A: inspect covariate balance using a t-test of means
+
+```{r}
+#t-test of means
+t.test(matched$mage[matched$mbsmoke=="smoker"],matched$mage[matched$mbsmoke!="smoker"])
+t.test(matched$medu[matched$mbsmoke=="smoker"],matched$medu[matched$mbsmoke!="smoker"])
+
+```
+
+
+Optional: inspect the covariate balance using average absolute standardized difference. Have a look at Simon Ejdemyr's PSM tutorial: http://stanford.edu/~ejdemyr/r-tutorials-archive/tutorial8.html for this.
+
+Step 5: Finally, to get the average treatment effect from our PSM set-up, we compare the grouped means in the matched sample:
+
+```{r}
+with(matched, t.test(bweight ~ mbsmoke))
+```
+
+## Resources {.tabset}
+
+### Light Reading
+One way researchers have concocted to deal with this phenomenon is to use the Potential Outcome Model. [The Econometrics With R] (https://www.econometrics-with-r.org/13-1-poceaie.html) is a good resoure. 
+
+### Not So Light Reading
+
+1. [Rosenbaum and Rubin 1983](http://biomet.oxfordjournals.org/content/70/1/41.short)
+2. [Judea Pearl's Causality](http://bayes.cs.ucla.edu/BOOK-2K/). If not cover-to-cover than at least Chapter 11 where Propensity Score Matching is specifically addressed.
+3. [Read Andrew Gelman's thoughts on causality and PSM](http://andrewgelman.com/2009/07/23/pearls_and_gelm/)
+
