@@ -12,12 +12,7 @@ output: html_document
 
 Synthetic Control is an inferential methodology for comparative cases studies. The technique has some high-level conceptual similarities to Difference-in-Differences estimators. A key difference between the two is that D-i-D generally attempts to uncover some "treatment effect" by matching treated units to similar untreated units. The canonical example is Card and Krueger, 1994 (Minimum wages and employment: A case study of the New Jersey and Pennsylvania fast food industries, *American Economic Review*). In contrast to D-i-D, Synthetic Control attempts to empirically construct a single comparable non-treated unit (using a linear combination of control units) in order to assess the credible counter factual. 
 
-
-## Methods
-
-In this exercise I'm following along with the sample code provided in [Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of Statistical Software 42 (13) 1–17](https://www.jstatsoft.org/article/view/v042i13). Most of the code in this workbook come directly out of that Journal Article.
-
-I have provided a high-level view of some of the math behind Synthetic Control. Since I suspect this will be the least interesting part of the Vignette, I have tucked the math-y stuff at the end.
+## Packages and Dependencies
 
 ```{r}
 library(Synth)
@@ -26,13 +21,46 @@ library(ggplot2)
 library(ggthemes)
 library(data.table)
 library(tidyr)
-data(basque)
-head(basque)
 ```
+
+## Methods
+
+In this exercise I'm following along with the sample code provided in [Synthetic : An R Package for Synthetic Control Methods in Comparative Case Studies. Journal of Statistical Software 42 (13) 1–17](https://www.jstatsoft.org/article/view/v042i13). Most of the code in this workbook come directly out of that Journal Article.
+
+I highly suggest thumbing through some of academic work by Abadie and company on the Synthetic Control methodology. It's a reasonably complex modeling approach that I will not be able to exhaustively discuss here. The kernel of the synthetic control approach can be comically oversimplified as follows:
+
+* suppose we have an outcome variable measured for a particular unit (a country, school district, whatever) over time, $Y_{it}$.
+* using the nomenclature of the ```Synth``` R package, the vector of outcomes for the "treated" or "affected" unit is $Y_{0}$
+* we also have observations on the outcome variable for "control" or "unaffected" units, $Y_1$
+* we have observable characteristics of the units over time which are contained in a matrix $X$.
+* $X_1$ is a matrix with characteristics of the treated unit. It's dimensionality is as follows: the number of rows equals the number of different characteristics (populations, educational attainment, etc...). The values, in this particular example, are the mean values of each characteristic measured over the pre-intervention period.
+* $X_0$ is a matrix like $X_1$ containing mean values of characteristics for the "control" units.
+
+The units in $X_0$ are often referred to as the "donor pool." 
+
+A fundamental task of Synthetic Control is forming a "synthetic unit" that is as similar to the "treated" unit as possible. This is generally done by searching for a linear combination of units in the "donor pool" that maximizes "similarity". 
+
+The ```synth()``` function in the ``Synth``` packages looks for a set of weights $W^*$ that solves:
+
+$||X_1-X_0W|| = \sqrt{(X_1-X_0W)'V(X_1-X_0W)}$
+
+From the [Synth Vignette](): 
+
+> where V is defined as some (k × k) symmetric and positive semidefinite matrix. The V matrix is introduced to allow different weights to the variables in X0 and X1 depending on their predictive power on the outcome. An optimal choice of V assigns weights that minimize the mean square error of the synthetic control estimator, that is the expectation of $(Y_1− Y_0W^∗)'(Y_1 − Y_0W^∗)$
+
+Once these optimal weights $W^*$ are found, they are generally applied to the time-series of values in the $X$ matrix in order to construct the credible counterfactual outcome of the treated unit. 
+
 
 ## Data
 
 Operationally, Synthetic Control organizes matricies according to cross-sectional units, time-periods, predictors, and outcome variables. Let's familiarize ourselves with the basic elements of the data:
+
+
+```{r}
+data(basque)
+head(basque)
+```
+
 
 ```{r}
 unique(basque$regionname)
@@ -45,7 +73,7 @@ So we have 18 unique regions. Measured over how many time-periods?
 unique(basque$year)
 ```
 
-So the data form a complete panel of observations on ```{r}length(unique(basque$regionname))``` regions over ```{r}length(unique(basque$year))``` time periods.
+So the data form a complete panel of observations on 18 regions over 43 time periods.
 
 ## Data Summaries {.tabset}
 
@@ -263,16 +291,6 @@ ggplot(plot.df,aes(x=year,y=gdp,linetype=unit)) + geom_line() + geom_point() +
 
 ```
 
-## Some Math
-
-Let:
-
-* $Y_{it}^N$ be the outcome for state $i$ in the absence of the policy
-* $T^0$ is the time-period of intervention such that $t \in (1,...,T^0)$ is the pre-treatment period
-* $Y_{it}^I$ is the outcome for state $i$ if the state were exposed to the policy intervention
-* it is assumed that the treatment has no effect before implementation so $Y_{it}^N=Y_{it}^I$ for $t \in (1,...T^0)$
-
-The effect of the intervention is $Y_{it}^I-Y_{it}^N=\alpha_{it}$.
 
 ## Resources
 
