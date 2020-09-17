@@ -318,7 +318,7 @@ with(matched, t.test(bweight ~ mbsmoke))
 ## Resources {.tabset}
 
 ### Light Reading
-One way researchers have concocted to deal with this phenomenon is to use the Potential Outcome Model. [The Econometrics With R] (https://www.econometrics-with-r.org/13-1-poceaie.html) is a good resoure. 
+One way researchers have concocted to deal with the phenomenon of heterogenous treatment effects is to use the Potential Outcome Model. [The Econometrics With R](https://www.econometrics-with-r.org/13-1-poceaie.html) e-book is a good resouce. 
 
 ### Not So Light Reading
 
